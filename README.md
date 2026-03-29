@@ -18,7 +18,7 @@ Same matching logic, same PnL calculations, same position limits — now in Pyth
 
 ```bash
 # 1. Clone
-git clone <this-repo-url>
+git clone "https://github.com/Akgithub2028/IMC-Prosperity-4-Backtester"
 cd prosperity_backtester
 
 # 2. Install deps
@@ -38,8 +38,8 @@ python run_backtest.py --trader my_strategy.py
 
 ```python
 # Cell 1: Clone and setup
-!git clone <this-repo-url>
-%cd prosperity_backtester
+!git clone "https://github.com/Akgithub2028/IMC-Prosperity-4-Backtester"
+%cd IMC-Prosperity-4-Backtester
 !pip install -q matplotlib numpy
 !python colab_setup.py
 
@@ -56,7 +56,7 @@ class Trader:
         return orders, 0, ""
 
 # Cell 3: Run backtest
-!python run_backtest.py
+%run run_backtest.py
 ```
 
 ## CLI Options
@@ -111,7 +111,7 @@ prosperity_backtester/
 | Total Trades | Count of own trades |
 | Avg Fill | Average trade fill quantity |
 | Recovery | Ticks from trough to new high |
-
+|Profit Factor|	Gross profit divided by gross loss. (A value > 1.0 means profitable) |
 ## Position Limits (per product)
 
 These are hardcoded to match the Rust backtester and IMC competition rules:
