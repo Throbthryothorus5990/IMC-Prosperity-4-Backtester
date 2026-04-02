@@ -40,14 +40,8 @@ def _save_and_show(fig, save_path: str, label: str = "") -> None:
     fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="#0d1117")
     print(f"  [SAVED] {save_path}")
     
-    # Attempt to show via IPython for Google Colab/Jupyter if possible
-    try:
-        from IPython.display import Image, display
-        display(Image(filename=save_path))
-    except (ImportError, Exception):
-        pass
-
-    plt.show()  # Shows inline in Colab/Jupyter (%matplotlib inline), no-op in Agg
+    # We only rely on plt.show() to prevent showing duplicates in Colab!
+    plt.show()  
     plt.close(fig)
 
 
@@ -189,7 +183,10 @@ def compute_trade_metrics(result: BacktestResult):
         ts = t.timestamp
         product = t.symbol
         price = t.price
-        qty = t.quantity
+        
+        # Check direction based on SUBMISSION
+        is_buy = getattr(t, "buyer", "") == "SUBMISSION"
+        actual_qty = t.quantity if is_buy else -t.quantity
         
         fv = fv_lookup.get(ts, {}).get(product)
         if fv is None: 
@@ -197,8 +194,7 @@ def compute_trade_metrics(result: BacktestResult):
         if fv is None: 
             fv = price
         
-        # Positive qty = bought. intrinsic value = fv * qty, cost = price * qty -> profit = qty * (fv - price)
-        trade_profit = qty * (fv - price)
+        trade_profit = actual_qty * (fv - price)
         # Avoid 100% winrate if no pricing data exists
         is_profit = trade_profit > 0 if fv != price else False
         
@@ -218,7 +214,7 @@ def compute_trade_metrics(result: BacktestResult):
                     
         product_trade_markers[product].append({
             "timestamp": ts,
-            "type": "buy" if qty > 0 else "sell",
+            "type": "buy" if is_buy else "sell",
             "price": price,
             "is_profit": is_profit
         })
@@ -480,12 +476,20 @@ def visualise(
     ax4.set_facecolor("#161b22")
     returns = metrics["returns"]
     if returns:
-        ax4.hist(
-            returns, bins=min(80, max(20, len(returns) // 20)),
-            color="#58a6ff", alpha=0.7, edgecolor="#1f6feb",
+        bins = min(80, max(20, len(returns) // 20))
+        counts, bin_edges, patches = ax4.hist(
+            returns, bins=bins, alpha=0.8,
         )
+        for patch, edge in zip(patches, bin_edges):
+            if edge < 0:
+                patch.set_facecolor("#f85149")
+                patch.set_edgecolor("#ff7b72")
+            else:
+                patch.set_facecolor("#3fb950")
+                patch.set_edgecolor("#7ee787")
+                
         mean_ret = np.mean(returns)
-        ax4.axvline(mean_ret, color="#3fb950", linewidth=1.5, linestyle="--",
+        ax4.axvline(mean_ret, color="#58a6ff", linewidth=1.5, linestyle="--",
                      label=f"Mean: {mean_ret:.4f}")
     ax4.set_title("Return Distribution", fontsize=13, color="#c9d1d9", pad=10)
     ax4.set_xlabel("Return (tick-to-tick PnL change)", fontsize=10, color="#8b949e")
@@ -573,7 +577,10 @@ def visualise(
             valid = [(t, v) for t, v in zip(fv_timestamps, fv_vals) if v is not None]
             if valid:
                 t_val, f_val = zip(*valid)
-                ax_fv.plot(t_val, f_val, color=colors[i % len(colors)], linewidth=1.2, label=f"Fair Value ({product})")
+                p_color = "#58a6ff" if "EMR" in product else "#d2a8ff" if "TOM" in product else colors[i % len(colors)]
+                # Give a radiant glow
+                ax_fv.plot(t_val, f_val, color=p_color, linewidth=1.8, label=f"Fair Value ({product})", zorder=3)
+                ax_fv.fill_between(t_val, min(f_val), f_val, color=p_color, alpha=0.1, zorder=2)
             
             markers = prod_markers.get(product, [])
             buy_t, buy_p = [], []
@@ -598,6 +605,7 @@ def visualise(
                 ax_fv.scatter(sell_t, sell_p, marker="v", color="#f85149", s=60, label="Sell", zorder=10)
                 
             ax_fv.set_title(f"Fair Value & Trades: {SHORT_PRODUCT_LABELS.get(product, product)}", fontsize=13, color="#c9d1d9", pad=10)
+            ax_fv.set_xlim([0, 100000])  # Zoomed to first 100k timestamps interval
             ax_fv.legend(fontsize=8, loc="upper right", framealpha=0.3)
             ax_fv.grid(True, alpha=0.1, color="#30363d")
             ax_fv.set_xlabel("Timestamp", fontsize=10, color="#8b949e")
@@ -753,4 +761,5 @@ def save_run_log(result: BacktestResult, label: str = "") -> str:
     with open(log_path, "w") as f:
         json.dump(log_data, f, indent=2)
 
+    print(f"  [LOG] {log_path}")
     return log_path
