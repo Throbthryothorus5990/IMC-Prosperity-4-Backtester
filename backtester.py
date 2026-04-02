@@ -15,11 +15,13 @@ import math
 import os
 import sys
 import importlib.util
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from datamodel import (
     Listing,
@@ -202,6 +204,13 @@ class BacktestResult:
     mid_price_series: List[Dict[str, Any]] = field(default_factory=list)
     own_trades_all: List[InternalTrade] = field(default_factory=list)
     products: List[str] = field(default_factory=list)
+    # ── New fields ──
+    # fair_value_series: rolling-regression microprice fair value per product per tick
+    fair_value_series: List[Dict[str, Any]] = field(default_factory=list)
+    # book_snapshot_series: full 3-level order book per product per tick (for L2/L3 analysis)
+    book_snapshot_series: List[Dict[str, Any]] = field(default_factory=list)
+    # own_trades_enriched: own trades annotated with fair value and per-trade PnL contribution
+    own_trades_enriched: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ─── Python's banker's rounding (identical to Rust round_ties_even) ───────────
@@ -991,9 +1000,60 @@ def _invoke_trader(trader, state: TradingState):
 # ─── Main Backtest Loop ──────────────────────────────────────────────────────
 
 
+def _compute_microprice(bids: List["_BookLevel"], asks: List["_BookLevel"]) -> Optional[float]:
+    """
+    Compute level-1 microprice = (best_bid × best_ask_vol + best_ask × best_bid_vol)
+                                  / (best_bid_vol + best_ask_vol).
+    Returns None if either side is empty.
+    """
+    if not bids or not asks:
+        return None
+    bb, bbv = bids[0].price, bids[0].volume
+    ba, bav = asks[0].price, asks[0].volume
+    total = bbv + bav
+    if total <= 0:
+        return None
+    return (bb * bav + ba * bbv) / total
+
+
+def _rolling_regression_fair_value(
+    history: List[float],
+    current_microprice: Optional[float],
+    fallback_mid: Optional[float],
+) -> Optional[float]:
+    """
+    Forward-rolling-regression fair value at time t.
+
+    Uses the past N microprices (history, NOT including time t) to fit a
+    linear trend and extrapolate one step ahead.
+
+    • N >= 2  → linear regression extrapolation  (playbook: 10-tick window)
+    • N == 1  → use the single past value as estimate
+    • N == 0  → fall back to current microprice, then CSV mid price
+    """
+    n = len(history)
+    if n >= 2:
+        x = np.arange(n, dtype=np.float64)
+        y = np.array(history, dtype=np.float64)
+        slope, intercept = np.polyfit(x, y, 1)
+        return float(slope * n + intercept)   # extrapolate one step ahead
+    elif n == 1:
+        return float(history[0])
+    elif current_microprice is not None:
+        return float(current_microprice)
+    else:
+        return float(fallback_mid) if fallback_mid is not None else None
+
+
 def run_backtest(request: RunRequest) -> BacktestResult:
     """
     Run the backtest — faithful port of runner.rs run_backtest().
+
+    PnL formula follows the IMC Prosperity playbook:
+        PnL = cash_flows + current_position × fair_value
+
+    where fair_value is estimated via a forward-rolling linear regression on
+    the past 10 level-1 microprices (excluding the current timestamp).
     """
     dataset = load_dataset(request.dataset_file)
 
@@ -1021,11 +1081,19 @@ def run_backtest(request: RunRequest) -> BacktestResult:
     final_pnl_total = 0.0
     final_pnl_by_product = OrderedDict((p, 0.0) for p in dataset.products)
 
+    # ── Rolling microprice history for fair-value estimation (max 10 past values) ──
+    microprice_history: Dict[str, deque] = {
+        p: deque(maxlen=10) for p in dataset.products
+    }
+
     # Series for visualization
     pnl_series: List[Dict[str, Any]] = []
     position_series: List[Dict[str, Any]] = []
     mid_price_series: List[Dict[str, Any]] = []
+    fair_value_series: List[Dict[str, Any]] = []
+    book_snapshot_series: List[Dict[str, Any]] = []
     all_own_trades: List[InternalTrade] = []
+    all_own_trades_enriched: List[Dict[str, Any]] = []
 
     tick_count = len(ticks)
 
@@ -1042,6 +1110,45 @@ def run_backtest(request: RunRequest) -> BacktestResult:
             position, orders_by_symbol
         )
 
+        # ── Pre-compute fair values and book snapshots for this tick ──
+        # (uses PAST microprice history, not including current tick)
+        fair_value_by_product: Dict[str, Optional[float]] = {}
+        book_snap_entry: Dict[str, Any] = {"timestamp": tick.timestamp}
+        current_microprices: Dict[str, Optional[float]] = {}
+
+        for product in dataset.products:
+            snapshot = tick.products.get(product)
+            if snapshot is None:
+                fair_value_by_product[product] = None
+                book_snap_entry[product] = None
+                current_microprices[product] = None
+                continue
+
+            # Sort book levels
+            bids_sorted = sorted(snapshot.bids, key=lambda l: -l.price)
+            asks_sorted = sorted(snapshot.asks, key=lambda l: l.price)
+
+            # Store full 3-level book snapshot for L2/L3 analysis
+            book_snap_entry[product] = {
+                "bids": [(l.price, l.volume) for l in bids_sorted[:3]],
+                "asks": [(l.price, l.volume) for l in asks_sorted[:3]],
+            }
+
+            # Current-tick level-1 microprice (for updating history AFTER using history)
+            mp = _compute_microprice(
+                [_BookLevel(l.price, l.volume) for l in bids_sorted],
+                [_BookLevel(l.price, l.volume) for l in asks_sorted],
+            )
+            current_microprices[product] = mp
+
+            # Fair value = forward-rolling regression on PAST microprices
+            history = list(microprice_history[product])   # excludes current tick
+            fv = _rolling_regression_fair_value(history, mp, snapshot.mid_price)
+            fair_value_by_product[product] = fv
+
+        book_snapshot_series.append(book_snap_entry)
+
+        # ── Order matching (unchanged logic) ──
         own_trades_tick: Dict[str, List[InternalTrade]] = {}
         market_trades_next: Dict[str, List[InternalTrade]] = {}
 
@@ -1089,24 +1196,53 @@ def run_backtest(request: RunRequest) -> BacktestResult:
                 own_trades_tick[product] = symbol_own_trades
                 all_own_trades.extend(symbol_own_trades)
 
+                # Enrich trades with fair value + per-trade PnL contribution
+                fv = fair_value_by_product.get(product)
+                for trade in symbol_own_trades:
+                    is_buy = trade.buyer == "SUBMISSION"
+                    if fv is not None:
+                        # Buy profit: fair_value > trade_price  → positive
+                        # Sell profit: trade_price > fair_value → positive
+                        pnl_contrib = (
+                            (fv - trade.price) * trade.quantity
+                            if is_buy
+                            else (trade.price - fv) * trade.quantity
+                        )
+                    else:
+                        pnl_contrib = 0.0
+                    all_own_trades_enriched.append({
+                        "symbol": trade.symbol,
+                        "price": trade.price,
+                        "quantity": trade.quantity,
+                        "is_buy": is_buy,
+                        "timestamp": trade.timestamp,
+                        "fair_value": fv,
+                        "pnl_contribution": pnl_contrib,
+                    })
+
             if original_market:
                 market_trades_next[product] = original_market
 
-        # Compute PnL
+        # ── PnL: playbook formula = cash_flows + position × fair_value ──
         pnl_by_product = OrderedDict()
         for product in dataset.products:
-            snapshot = tick.products.get(product)
-            mid_price = snapshot.mid_price if snapshot else None
+            fv = fair_value_by_product.get(product)
             mark_to_market = 0.0
-            if mid_price is not None:
-                mark_to_market = position.get(product, 0) * mid_price
+            if fv is not None:
+                mark_to_market = position.get(product, 0) * fv
             pnl = cash_by_product.get(product, 0.0) + mark_to_market
             pnl_by_product[product] = pnl
 
         final_pnl_total = sum(pnl_by_product.values())
         final_pnl_by_product = pnl_by_product
 
-        # Record series data
+        # ── Append current microprice to history (AFTER using history for fair value) ──
+        for product in dataset.products:
+            mp = current_microprices.get(product)
+            if mp is not None:
+                microprice_history[product].append(mp)
+
+        # ── Record series data ──
         pnl_entry = {"timestamp": tick.timestamp, "total": final_pnl_total}
         pnl_entry.update(pnl_by_product)
         pnl_series.append(pnl_entry)
@@ -1120,6 +1256,10 @@ def run_backtest(request: RunRequest) -> BacktestResult:
             snapshot = tick.products.get(product)
             mid_entry[product] = snapshot.mid_price if snapshot else None
         mid_price_series.append(mid_entry)
+
+        fv_entry: Dict[str, Any] = {"timestamp": tick.timestamp}
+        fv_entry.update({p: fair_value_by_product.get(p) for p in dataset.products})
+        fair_value_series.append(fv_entry)
 
         own_trades_prev = own_trades_tick
         market_trades_prev = market_trades_next
@@ -1147,4 +1287,7 @@ def run_backtest(request: RunRequest) -> BacktestResult:
         mid_price_series=mid_price_series,
         own_trades_all=all_own_trades,
         products=dataset.products,
+        fair_value_series=fair_value_series,
+        book_snapshot_series=book_snapshot_series,
+        own_trades_enriched=all_own_trades_enriched,
     )
