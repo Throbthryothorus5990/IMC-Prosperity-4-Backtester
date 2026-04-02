@@ -23,6 +23,8 @@ import numpy as np
 
 try:
     import matplotlib
+    # CRITICAL: Use Agg backend to permanently disable inline duplicate Colab auto-rendering hooks
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
     from matplotlib.gridspec import GridSpec
@@ -610,7 +612,7 @@ def visualise(
                 ax_fv.scatter(sell_t, sell_p, marker="v", color="#f85149", s=60, label="Sell", zorder=10)
                 
             ax_fv.set_title(f"Fair Value & Trades: {SHORT_PRODUCT_LABELS.get(product, product)}", fontsize=13, color="#c9d1d9", pad=10)
-            ax_fv.set_xlim([0, 10000])  # Zoomed to first 100k timestamps interval
+            ax_fv.set_xlim([0, 100000])  # Zoomed to 0.1 of 1e6 (first 1000 ticks)
             ax_fv.legend(fontsize=8, loc="upper right", framealpha=0.3)
             ax_fv.grid(True, alpha=0.1, color="#30363d")
             ax_fv.set_xlabel("Timestamp", fontsize=10, color="#8b949e")
