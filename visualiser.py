@@ -40,8 +40,13 @@ def _save_and_show(fig, save_path: str, label: str = "") -> None:
     fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="#0d1117")
     print(f"  [SAVED] {save_path}")
     
-    # We only rely on plt.show() to prevent showing duplicates in Colab!
-    plt.show()  
+    # Prevent duplicate plots in Colab: output the saved image explicitly, then close the axes.
+    try:
+        from IPython.display import Image, display
+        display(Image(filename=save_path))
+    except (ImportError, Exception):
+        pass
+
     plt.close(fig)
 
 
