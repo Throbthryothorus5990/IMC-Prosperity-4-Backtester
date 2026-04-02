@@ -39,6 +39,14 @@ def _save_and_show(fig, save_path: str, label: str = "") -> None:
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="#0d1117")
     print(f"  [SAVED] {save_path}")
+    
+    # Attempt to show via IPython for Google Colab/Jupyter if possible
+    try:
+        from IPython.display import Image, display
+        display(Image(filename=save_path))
+    except (ImportError, Exception):
+        pass
+
     plt.show()  # Shows inline in Colab/Jupyter (%matplotlib inline), no-op in Agg
     plt.close(fig)
 
@@ -120,6 +128,8 @@ def compute_metrics(result: BacktestResult) -> Dict[str, Any]:
     else:
         recovery_str = "No drawdown"
 
+    win_rate, l2_flat, l3_non_empty, loss_trades, prod_markers = compute_trade_metrics(result)
+
     return {
         "profit_factor": profit_factor,
         "max_drawdown": max_drawdown,
@@ -135,6 +145,11 @@ def compute_metrics(result: BacktestResult) -> Dict[str, Any]:
         "pnl_values": pnl_values,
         "timestamps": timestamps,
         "cummax": cummax,
+        "win_rate": win_rate,
+        "l2_flat_loss": l2_flat,
+        "l3_non_empty_loss": l3_non_empty,
+        "loss_trades": loss_trades,
+        "product_trade_markers": prod_markers,
     }
 
 def _empty_metrics(result: BacktestResult) -> Dict[str, Any]:
@@ -153,6 +168,11 @@ def _empty_metrics(result: BacktestResult) -> Dict[str, Any]:
         "pnl_values": [],
         "timestamps": [],
         "cummax": [],
+        "win_rate": 0.0,
+        "l2_flat_loss": 0,
+        "l3_non_empty_loss": 0,
+        "loss_trades": 0,
+        "product_trade_markers": {},
     }
 
 def compute_trade_metrics(result: BacktestResult):
@@ -259,12 +279,18 @@ def print_metrics(metrics: Dict[str, Any], label: str = "") -> None:
     print(f"  Final PnL:          {metrics['final_pnl']:>12.2f}")
     print(f"  Tick Count:         {metrics['tick_count']:>12d}")
     print(f"  Total Trades:       {metrics['total_trades']:>12d}")
+    print(f"  Win Rate:           {metrics['win_rate']*100:>11.1f}%")
     print(f"  Avg Fill:           {metrics['avg_fill']:>12.2f}")
     print(f"  Max Drawdown:       {metrics['max_drawdown']:>12.2f}")
     print(f"  Sharpe Ratio:       {metrics['sharpe_ratio']:>12.4f}")
     print(f"  Calmar Ratio:       {metrics['calmar_ratio']:>12.4f}")
     print(f"  Profit Factor:      {metrics['profit_factor']:>12.4f}")
     print(f"  Recovery:           {metrics['recovery']:>12s}")
+    
+    loss_trades = metrics.get('loss_trades', 0)
+    print(f"  Losses:             {loss_trades:>12d}")
+    print(f"  L2 Flat (Losses):   {metrics.get('l2_flat_loss', 0):>12d}")
+    print(f"  L3 Present (Losses):{metrics.get('l3_non_empty_loss', 0):>12d}")
     print(f"{'═' * len(header)}")
 
 
@@ -476,7 +502,11 @@ def visualise(
     ax5.set_facecolor("#161b22")
     ax5.axis("off")
 
-    win_rate, l2_flat, l3_non_empty, loss_trades, prod_markers = compute_trade_metrics(result)
+    win_rate = metrics.get('win_rate', 0.0)
+    l2_flat = metrics.get('l2_flat_loss', 0)
+    l3_non_empty = metrics.get('l3_non_empty_loss', 0)
+    loss_trades = metrics.get('loss_trades', 0)
+    prod_markers = metrics.get('product_trade_markers', {})
 
     table_data = [
         ["Metric", "Value"],
@@ -539,13 +569,13 @@ def visualise(
                 buy_t.append(m["timestamp"])
                 buy_p.append(m["price"])
                 # Add profit/loss symbol above the marker
-                symbol = r'$\checkmark$' if m["is_profit"] else r'$\times$'
+                symbol = '✓' if m["is_profit"] else '✗'
                 color = "#3fb950" if m["is_profit"] else "#f85149"
                 ax_fv.text(m["timestamp"], m["price"], symbol, color=color, ha='center', va='bottom', fontsize=12, fontweight='bold')
             else:
                 sell_t.append(m["timestamp"])
                 sell_p.append(m["price"])
-                symbol = r'$\checkmark$' if m["is_profit"] else r'$\times$'
+                symbol = '✓' if m["is_profit"] else '✗'
                 color = "#3fb950" if m["is_profit"] else "#f85149"
                 ax_fv.text(m["timestamp"], m["price"], symbol, color=color, ha='center', va='top', fontsize=12, fontweight='bold')
                 
