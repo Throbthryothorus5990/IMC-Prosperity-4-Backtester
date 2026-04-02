@@ -103,6 +103,16 @@ def compute_metrics(result: BacktestResult) -> Dict[str, Any]:
     fills = [t.quantity for t in result.own_trades_all]
     avg_fill = sum(fills) / len(fills) if fills else 0.0
 
+    # ── Win rate (based on per-trade PnL contribution against fair value) ──
+    enriched = getattr(result, "own_trades_enriched", [])
+    if enriched:
+        winning = sum(1 for t in enriched if t["pnl_contribution"] > 0)
+        win_rate = winning / len(enriched)
+        winning_trades = winning
+    else:
+        win_rate = 0.0
+        winning_trades = 0
+
     # ── Recovery ──
     # Time from max-drawdown trough to recovery (new high)
     if max_drawdown < 0:
@@ -135,6 +145,8 @@ def compute_metrics(result: BacktestResult) -> Dict[str, Any]:
         "pnl_values": pnl_values,
         "timestamps": timestamps,
         "cummax": cummax,
+        "win_rate": win_rate,
+        "winning_trades": winning_trades,
     }
 
 def _empty_metrics(result: BacktestResult) -> Dict[str, Any]:
@@ -153,6 +165,8 @@ def _empty_metrics(result: BacktestResult) -> Dict[str, Any]:
         "pnl_values": [],
         "timestamps": [],
         "cummax": [],
+        "win_rate": 0.0,
+        "winning_trades": 0,
     }
 
 
@@ -209,6 +223,9 @@ def print_metrics(metrics: Dict[str, Any], label: str = "") -> None:
     print(f"  Tick Count:         {metrics['tick_count']:>12d}")
     print(f"  Total Trades:       {metrics['total_trades']:>12d}")
     print(f"  Avg Fill:           {metrics['avg_fill']:>12.2f}")
+    wr = metrics.get("win_rate", 0.0)
+    wt = metrics.get("winning_trades", 0)
+    print(f"  Win Rate:           {wr*100:>11.1f}%  ({wt}/{metrics['total_trades']} trades)")
     print(f"  Max Drawdown:       {metrics['max_drawdown']:>12.2f}")
     print(f"  Sharpe Ratio:       {metrics['sharpe_ratio']:>12.4f}")
     print(f"  Calmar Ratio:       {metrics['calmar_ratio']:>12.4f}")
@@ -428,6 +445,7 @@ def visualise(
         ["Tick Count", f"{metrics['tick_count']:,}"],
         ["Total Trades", f"{metrics['total_trades']:,}"],
         ["Avg Fill", f"{metrics['avg_fill']:.2f}"],
+        ["Win Rate", f"{metrics.get('win_rate', 0)*100:.1f}%"],
         ["Profit Factor", f"{metrics['profit_factor']:.4f}"],
         ["Max Drawdown", f"{metrics['max_drawdown']:.2f}"],
         ["Sharpe Ratio", f"{metrics['sharpe_ratio']:.4f}"],
@@ -538,7 +556,337 @@ def visualise_product_comparison(
     _save_and_show(fig, save_path, "comparison")
 
 
-# ─── All-in-one Analysis ─────────────────────────────────────────────────────
+# ─── Fair Value + Trade Markers ──────────────────────────────────────────────
+
+
+def visualise_fair_value_trades(
+    result: BacktestResult,
+    label: str = "",
+    save_path: Optional[str] = None,
+    show: bool = True,
+) -> None:
+    """
+    Per-product fair-value timeseries with executed trade markers.
+
+    For each product:
+      • Line: forward-rolling-regression fair value
+      • ▲ green triangle  = buy trade (at trade price)
+      • ▼ red   triangle  = sell trade (at trade price)
+      • ✓ green above/below = trade was profitable (pnl_contribution > 0)
+      • ✗ red   above/below = trade was a loss     (pnl_contribution ≤ 0)
+      • Win rate annotation for the day
+    """
+    if not HAS_MATPLOTLIB:
+        print("[WARN] matplotlib not installed — skipping visualisations.")
+        return
+
+    fair_value_series = getattr(result, "fair_value_series", [])
+    own_trades_enriched = getattr(result, "own_trades_enriched", [])
+
+    if not fair_value_series:
+        print("[WARN] No fair value data — skipping fair value visualisation.")
+        return
+
+    products = result.products
+    n = len(products)
+    if n == 0:
+        return
+
+    plt.style.use("dark_background")
+    fig, axes = plt.subplots(n, 1, figsize=(20, 5 * n), squeeze=False)
+    fig.patch.set_facecolor("#0d1117")
+
+    title = f"Fair Value & Trade Analysis{f'  —  {label}' if label else ''}"
+    fig.suptitle(title, fontsize=16, fontweight="bold", color="#58a6ff", y=0.99)
+
+    fv_timestamps = [e["timestamp"] for e in fair_value_series]
+
+    colors = [
+        "#58a6ff", "#3fb950", "#f0883e", "#d2a8ff",
+        "#ff7b72", "#79c0ff", "#7ee787", "#ffa657",
+    ]
+
+    for row_idx, product in enumerate(products):
+        ax = axes[row_idx][0]
+        ax.set_facecolor("#161b22")
+
+        # ── Fair value timeseries ──
+        fv_vals = [e.get(product) for e in fair_value_series]
+        valid_fv = [(t, v) for t, v in zip(fv_timestamps, fv_vals) if v is not None]
+        fv_range = 1.0  # fallback for offset calculations
+
+        if valid_fv:
+            ts_v, fv_v_list = zip(*valid_fv)
+            fv_v = list(fv_v_list)
+            fv_color = colors[row_idx % len(colors)]
+            ax.plot(ts_v, fv_v, color=fv_color, linewidth=1.3,
+                    label="Fair Value (regression)", zorder=3, alpha=0.9)
+            fv_range = max(max(fv_v) - min(fv_v), 1.0)
+
+        # Also plot CSV mid price faintly for reference
+        mid_vals = [e.get(product) for e in result.mid_price_series]
+        valid_mid = [(t, v) for t, v in zip(
+            [e["timestamp"] for e in result.mid_price_series], mid_vals
+        ) if v is not None]
+        if valid_mid:
+            ts_m, mp_v = zip(*valid_mid)
+            ax.plot(ts_m, mp_v, color="#484f58", linewidth=0.7,
+                    linestyle=":", label="Mid Price", zorder=2, alpha=0.6)
+
+        # ── Trade markers ──
+        product_trades = [t for t in own_trades_enriched if t["symbol"] == product]
+        y_offset = fv_range * 0.025  # small vertical nudge for annotations
+
+        if product_trades:
+            buys  = [t for t in product_trades if t["is_buy"]]
+            sells = [t for t in product_trades if not t["is_buy"]]
+
+            # Buys — green up-triangles
+            if buys:
+                buy_ts     = [t["timestamp"] for t in buys]
+                buy_prices = [t["price"] for t in buys]
+                ax.scatter(buy_ts, buy_prices, marker="^", color="#3fb950",
+                           s=90, zorder=5, label="Buy", alpha=0.95, edgecolors="#ffffff",
+                           linewidths=0.4)
+                # Win/loss symbol above each buy marker
+                for t in buys:
+                    sym   = "✓" if t["pnl_contribution"] > 0 else "✗"
+                    color = "#3fb950" if t["pnl_contribution"] > 0 else "#f85149"
+                    ax.text(
+                        t["timestamp"], t["price"] + y_offset * 1.6,
+                        sym, ha="center", va="bottom",
+                        fontsize=7, color=color, fontweight="bold", zorder=6,
+                    )
+
+            # Sells — red down-triangles
+            if sells:
+                sell_ts     = [t["timestamp"] for t in sells]
+                sell_prices = [t["price"] for t in sells]
+                ax.scatter(sell_ts, sell_prices, marker="v", color="#f85149",
+                           s=90, zorder=5, label="Sell", alpha=0.95, edgecolors="#ffffff",
+                           linewidths=0.4)
+                # Win/loss symbol below each sell marker
+                for t in sells:
+                    sym   = "✓" if t["pnl_contribution"] > 0 else "✗"
+                    color = "#3fb950" if t["pnl_contribution"] > 0 else "#f85149"
+                    ax.text(
+                        t["timestamp"], t["price"] - y_offset * 1.6,
+                        sym, ha="center", va="top",
+                        fontsize=7, color=color, fontweight="bold", zorder=6,
+                    )
+
+            # Win rate annotation
+            total = len(product_trades)
+            wins  = sum(1 for t in product_trades if t["pnl_contribution"] > 0)
+            wr    = wins / total * 100 if total > 0 else 0.0
+            wr_color = "#3fb950" if wr >= 50 else "#f85149"
+            ax.text(
+                0.01, 0.97,
+                f"Win Rate: {wr:.1f}%  ({wins}/{total} trades)",
+                transform=ax.transAxes,
+                fontsize=10, color=wr_color, fontweight="bold",
+                va="top", ha="left",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="#0d1117",
+                          edgecolor="#30363d", alpha=0.85),
+                zorder=7,
+            )
+        else:
+            ax.text(
+                0.01, 0.97, "No trades",
+                transform=ax.transAxes, fontsize=9, color="#8b949e",
+                va="top", ha="left",
+            )
+
+        short = SHORT_PRODUCT_LABELS.get(product, product)
+        ax.set_title(f"{short}  —  Fair Value & Trades", fontsize=12,
+                     color="#c9d1d9", pad=8)
+        ax.set_xlabel("Timestamp", fontsize=9, color="#8b949e")
+        ax.set_ylabel("Price", fontsize=9, color="#8b949e")
+        ax.legend(fontsize=8, loc="upper right", framealpha=0.3, ncol=4)
+        ax.grid(True, alpha=0.1, color="#30363d")
+        ax.tick_params(colors="#8b949e", labelsize=7)
+        for spine in ax.spines.values():
+            spine.set_color("#30363d")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+
+    if not save_path:
+        os.makedirs("runs", exist_ok=True)
+        safe_label = label.replace(" ", "_").replace("/", "-") if label else "backtest"
+        save_path = os.path.join("runs", f"chart_{safe_label}_fair_value.png")
+
+    _save_and_show(fig, save_path, label)
+
+
+# ─── Loss-Point Order Book Analysis (L2/L3) ──────────────────────────────────
+
+
+def visualise_loss_book_analysis(
+    result: BacktestResult,
+    label: str = "",
+    save_path: Optional[str] = None,
+    show: bool = True,
+) -> None:
+    """
+    For each product, examine the order book at loss timestamps:
+
+    • "Flat L2 price" — level-2 bid price == level-1 bid price, OR
+                         level-2 ask price == level-1 ask price
+                         (same price repeated across book levels)
+    • "Non-empty L3"  — level-3 bid OR ask has non-zero volume
+
+    Displays percentage of loss trades that hit each condition as a grouped bar chart.
+    """
+    if not HAS_MATPLOTLIB:
+        print("[WARN] matplotlib not installed — skipping visualisations.")
+        return
+
+    own_trades_enriched = getattr(result, "own_trades_enriched", [])
+    book_snapshot_series = getattr(result, "book_snapshot_series", [])
+
+    if not own_trades_enriched or not book_snapshot_series:
+        print("[WARN] No enriched trade / book snapshot data — skipping L2/L3 analysis.")
+        return
+
+    # Build fast timestamp → book_snapshot lookup
+    book_by_ts: Dict[int, Any] = {e["timestamp"]: e for e in book_snapshot_series}
+
+    analysis: Dict[str, Dict[str, Any]] = {}
+    for product in result.products:
+        loss_trades = [
+            t for t in own_trades_enriched
+            if t["symbol"] == product and t["pnl_contribution"] < 0
+        ]
+        if not loss_trades:
+            continue
+
+        total_losses = len(loss_trades)
+        flat_l2_count   = 0
+        nonempty_l3_count = 0
+
+        for trade in loss_trades:
+            snap = book_by_ts.get(trade["timestamp"])
+            if snap is None:
+                continue
+            prod_book = snap.get(product)
+            if prod_book is None:
+                continue
+
+            bids = prod_book.get("bids", [])   # list of (price, vol) tuples, sorted desc
+            asks = prod_book.get("asks", [])   # sorted asc
+
+            # Flat L2: L2 bid price == L1 bid price  OR  L2 ask price == L1 ask price
+            flat_l2 = False
+            if len(bids) >= 2 and bids[1][0] == bids[0][0]:
+                flat_l2 = True
+            if len(asks) >= 2 and asks[1][0] == asks[0][0]:
+                flat_l2 = True
+            if flat_l2:
+                flat_l2_count += 1
+
+            # Non-empty L3: L3 bid or ask has positive volume
+            nonempty_l3 = False
+            if len(bids) >= 3 and bids[2][1] > 0:
+                nonempty_l3 = True
+            if len(asks) >= 3 and asks[2][1] > 0:
+                nonempty_l3 = True
+            if nonempty_l3:
+                nonempty_l3_count += 1
+
+        analysis[product] = {
+            "total_losses": total_losses,
+            "flat_l2_count": flat_l2_count,
+            "flat_l2_pct": flat_l2_count / total_losses * 100,
+            "nonempty_l3_count": nonempty_l3_count,
+            "nonempty_l3_pct": nonempty_l3_count / total_losses * 100,
+        }
+
+    # Print summary
+    print(f"\n─── Loss-Point Book Analysis{f'  —  {label}' if label else ''} ───")
+    for product, stats in analysis.items():
+        short = SHORT_PRODUCT_LABELS.get(product, product)
+        print(
+            f"  {short:<12s}  Losses: {stats['total_losses']:>4d}  "
+            f"Flat-L2: {stats['flat_l2_pct']:>5.1f}%  "
+            f"Non-empty-L3: {stats['nonempty_l3_pct']:>5.1f}%"
+        )
+
+    if not analysis:
+        print("[INFO] No loss trades found — skipping L2/L3 chart.")
+        return
+
+    plt.style.use("dark_background")
+    products_with_losses = list(analysis.keys())
+    n_prod = len(products_with_losses)
+    fig_w = max(10, n_prod * 3.5)
+    fig, ax = plt.subplots(figsize=(fig_w, 6))
+    fig.patch.set_facecolor("#0d1117")
+    ax.set_facecolor("#161b22")
+
+    title = f"Loss-Point Book Structure (L2 / L3){f'  —  {label}' if label else ''}"
+    fig.suptitle(title, fontsize=14, fontweight="bold", color="#58a6ff")
+
+    short_labels = [SHORT_PRODUCT_LABELS.get(p, p) for p in products_with_losses]
+    x = np.arange(n_prod)
+    width = 0.35
+
+    flat_l2_pcts     = [analysis[p]["flat_l2_pct"]     for p in products_with_losses]
+    nonempty_l3_pcts = [analysis[p]["nonempty_l3_pct"] for p in products_with_losses]
+
+    bars1 = ax.bar(x - width / 2, flat_l2_pcts,     width,
+                   label="Flat L2 price (%)", color="#f0883e", alpha=0.85)
+    bars2 = ax.bar(x + width / 2, nonempty_l3_pcts, width,
+                   label="Non-empty L3 bid/ask (%)", color="#d2a8ff", alpha=0.85)
+
+    # Value labels on bars
+    for bar in bars1:
+        h = bar.get_height()
+        if h > 0:
+            ax.text(bar.get_x() + bar.get_width() / 2, h + 0.8,
+                    f"{h:.1f}%", ha="center", va="bottom",
+                    fontsize=8, color="#c9d1d9")
+    for bar in bars2:
+        h = bar.get_height()
+        if h > 0:
+            ax.text(bar.get_x() + bar.get_width() / 2, h + 0.8,
+                    f"{h:.1f}%", ha="center", va="bottom",
+                    fontsize=8, color="#c9d1d9")
+
+    # Loss count annotations below x-axis
+    for i, p in enumerate(products_with_losses):
+        ax.text(x[i], -4,
+                f"n={analysis[p]['total_losses']} losses",
+                ha="center", va="top", fontsize=8, color="#8b949e")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(short_labels, fontsize=10, color="#c9d1d9")
+    ax.set_ylabel("% of Loss Trades", fontsize=10, color="#8b949e")
+    ax.set_ylim(-12, 110)
+    ax.legend(fontsize=9, framealpha=0.3)
+    ax.grid(True, alpha=0.1, color="#30363d", axis="y")
+    ax.tick_params(colors="#8b949e", labelsize=9)
+    for spine in ax.spines.values():
+        spine.set_color("#30363d")
+
+    # Explanatory footnote
+    fig.text(
+        0.01, 0.01,
+        "Flat L2: level-2 bid or ask price equals level-1 price  |  "
+        "Non-empty L3: level-3 bid or ask has non-zero volume",
+        fontsize=7, color="#484f58", va="bottom",
+    )
+
+    plt.tight_layout(rect=[0, 0.04, 1, 0.96])
+
+    if not save_path:
+        os.makedirs("runs", exist_ok=True)
+        safe_label = label.replace(" ", "_").replace("/", "-") if label else "backtest"
+        save_path = os.path.join("runs", f"chart_{safe_label}_loss_book.png")
+
+    _save_and_show(fig, save_path, label)
+
+
+
 
 
 def full_analysis(
