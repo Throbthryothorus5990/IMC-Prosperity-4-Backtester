@@ -93,10 +93,6 @@ def compute_metrics(result: BacktestResult) -> Dict[str, Any]:
     returns_arr = np.array(returns) if returns else np.array([0.0])
 
     # ── Sharpe ratio ──
-    # Note: High-Frequency algorithmic trading has exceptionally tiny standard deviations
-    # on tick returns. If we strictly annualized by 2,520,000 ticks/year, the Sharpe 
-    # would be 80+. We scale by standard sqrt(252) to give a human-readable normalized 
-    # ratio that bounds exactly as standard finance expects (1.0 to 5.0).
     annualization_factor = math.sqrt(252)
     mean_return = float(np.mean(returns_arr))
     std_return = float(np.std(returns_arr, ddof=1)) if len(returns_arr) > 1 else 1e-10
@@ -112,7 +108,6 @@ def compute_metrics(result: BacktestResult) -> Dict[str, Any]:
     avg_fill = sum(fills) / len(fills) if fills else 0.0
 
     # ── Recovery ──
-    # Time from max-drawdown trough to recovery (new high)
     if max_drawdown < 0:
         trough_idx = drawdowns.index(max_drawdown)
         recovery_idx = None
@@ -179,6 +174,7 @@ def compute_trade_metrics(result: BacktestResult):
     trades = result.own_trades_all
     fv_lookup = {e["timestamp"]: e for e in getattr(result, 'fair_value_series', [])}
     snap_lookup = {e["timestamp"]: e for e in getattr(result, 'market_snapshots', [])}
+    mid_lookup = {e["timestamp"]: e for e in getattr(result, 'mid_price_series', [])}
         
     num_trades = len(trades)
     profit_trades = 0
@@ -196,11 +192,15 @@ def compute_trade_metrics(result: BacktestResult):
         qty = t.quantity
         
         fv = fv_lookup.get(ts, {}).get(product)
-        if fv is None: fv = price
+        if fv is None: 
+            fv = mid_lookup.get(ts, {}).get(product)
+        if fv is None: 
+            fv = price
         
         # Positive qty = bought. intrinsic value = fv * qty, cost = price * qty -> profit = qty * (fv - price)
         trade_profit = qty * (fv - price)
-        is_profit = trade_profit > 0
+        # Avoid 100% winrate if no pricing data exists
+        is_profit = trade_profit > 0 if fv != price else False
         
         if is_profit:
             profit_trades += 1
@@ -341,15 +341,14 @@ def visualise(
     # ── Style setup ──
     plt.style.use("dark_background")
     
-    num_products = len(result.products)
-    fig_height = 16 + 4 * num_products
-    fig = plt.figure(figsize=(20, fig_height))
+    # ═══ MAIN METRICS FIGURE ═══
+    fig = plt.figure(figsize=(20, 16))
     fig.patch.set_facecolor("#0d1117")
 
     title = f"Backtest Analysis{f' — {label}' if label else ''}"
-    fig.suptitle(title, fontsize=18, fontweight="bold", color="#58a6ff", y=0.99)
+    fig.suptitle(title, fontsize=18, fontweight="bold", color="#58a6ff", y=0.98)
 
-    gs = GridSpec(3 + num_products, 2, figure=fig, hspace=0.4, wspace=0.3)
+    gs = GridSpec(3, 2, figure=fig, hspace=0.35, wspace=0.3)
 
     timestamps = metrics["timestamps"]
     pnl_values = metrics["pnl_values"]
@@ -545,61 +544,69 @@ def visualise(
 
     ax5.set_title("Performance Metrics", fontsize=13, color="#c9d1d9", pad=10)
 
-    # ═══ Panel 6+: Fair Value and Trades Per Product ═══
-    current_row = 3
-    fv_series = getattr(result, 'fair_value_series', [])
-    fv_timestamps = [e["timestamp"] for e in fv_series]
-    
-    for i, product in enumerate(result.products):
-        ax_fv = fig.add_subplot(gs[current_row, :])
-        ax_fv.set_facecolor("#161b22")
-        
-        fv_vals = [e.get(product) for e in fv_series]
-        # Filter None
-        valid = [(t, v) for t, v in zip(fv_timestamps, fv_vals) if v is not None]
-        if valid:
-            t_val, f_val = zip(*valid)
-            ax_fv.plot(t_val, f_val, color=colors[i % len(colors)], linewidth=1.2, label=f"Fair Value ({product})")
-        
-        markers = prod_markers.get(product, [])
-        buy_t, buy_p = [], []
-        sell_t, sell_p = [], []
-        for m in markers:
-            if m["type"] == "buy":
-                buy_t.append(m["timestamp"])
-                buy_p.append(m["price"])
-                # Add profit/loss symbol above the marker
-                symbol = '✓' if m["is_profit"] else '✗'
-                color = "#3fb950" if m["is_profit"] else "#f85149"
-                ax_fv.text(m["timestamp"], m["price"], symbol, color=color, ha='center', va='bottom', fontsize=12, fontweight='bold')
-            else:
-                sell_t.append(m["timestamp"])
-                sell_p.append(m["price"])
-                symbol = '✓' if m["is_profit"] else '✗'
-                color = "#3fb950" if m["is_profit"] else "#f85149"
-                ax_fv.text(m["timestamp"], m["price"], symbol, color=color, ha='center', va='top', fontsize=12, fontweight='bold')
-                
-        if buy_t:
-            ax_fv.scatter(buy_t, buy_p, marker="^", color="#3fb950", s=60, label="Buy", zorder=10)
-        if sell_t:
-            ax_fv.scatter(sell_t, sell_p, marker="v", color="#f85149", s=60, label="Sell", zorder=10)
-            
-        ax_fv.set_title(f"Fair Value & Trades: {SHORT_PRODUCT_LABELS.get(product, product)}", fontsize=13, color="#c9d1d9", pad=10)
-        ax_fv.legend(fontsize=8, loc="upper right", framealpha=0.3)
-        ax_fv.grid(True, alpha=0.1, color="#30363d")
-        ax_fv.set_xlabel("Timestamp", fontsize=10, color="#8b949e")
-        ax_fv.tick_params(colors="#8b949e", labelsize=8)
-        for spine in ax_fv.spines.values():
-            spine.set_color("#30363d")
-        current_row += 1
-
-    # Always save to file
+    # Always save the main figure
     if not save_path:
         os.makedirs("runs", exist_ok=True)
         safe_label = label.replace(" ", "_").replace("/", "-") if label else "backtest"
-        save_path = os.path.join("runs", f"chart_{safe_label}.png")
+        main_save_path = os.path.join("runs", f"chart_{safe_label}.png")
+    else:
+        main_save_path = save_path
 
-    _save_and_show(fig, save_path, label)
+    _save_and_show(fig, main_save_path, label)
+
+    # ═══ FAIR VALUE FIGURE ═══
+    num_products = len(result.products)
+    if num_products > 0:
+        fig_fv = plt.figure(figsize=(20, 4 * num_products))
+        fig_fv.patch.set_facecolor("#0d1117")
+        fig_fv.suptitle(f"Fair Value & Executions{f' — {label}' if label else ''}", fontsize=18, fontweight="bold", color="#58a6ff", y=0.99)
+        gs_fv = GridSpec(num_products, 1, figure=fig_fv, hspace=0.4)
+        
+        fv_series = getattr(result, 'fair_value_series', [])
+        fv_timestamps = [e["timestamp"] for e in fv_series]
+        
+        for i, product in enumerate(result.products):
+            ax_fv = fig_fv.add_subplot(gs_fv[i, 0])
+            ax_fv.set_facecolor("#161b22")
+            
+            fv_vals = [e.get(product) for e in fv_series]
+            valid = [(t, v) for t, v in zip(fv_timestamps, fv_vals) if v is not None]
+            if valid:
+                t_val, f_val = zip(*valid)
+                ax_fv.plot(t_val, f_val, color=colors[i % len(colors)], linewidth=1.2, label=f"Fair Value ({product})")
+            
+            markers = prod_markers.get(product, [])
+            buy_t, buy_p = [], []
+            sell_t, sell_p = [], []
+            for m in markers:
+                if m["type"] == "buy":
+                    buy_t.append(m["timestamp"])
+                    buy_p.append(m["price"])
+                    symbol = '✓' if m["is_profit"] else '✗'
+                    color = "#3fb950" if m["is_profit"] else "#f85149"
+                    ax_fv.text(m["timestamp"], m["price"], symbol, color=color, ha='center', va='bottom', fontsize=12, fontweight='bold')
+                else:
+                    sell_t.append(m["timestamp"])
+                    sell_p.append(m["price"])
+                    symbol = '✓' if m["is_profit"] else '✗'
+                    color = "#3fb950" if m["is_profit"] else "#f85149"
+                    ax_fv.text(m["timestamp"], m["price"], symbol, color=color, ha='center', va='top', fontsize=12, fontweight='bold')
+                    
+            if buy_t:
+                ax_fv.scatter(buy_t, buy_p, marker="^", color="#3fb950", s=60, label="Buy", zorder=10)
+            if sell_t:
+                ax_fv.scatter(sell_t, sell_p, marker="v", color="#f85149", s=60, label="Sell", zorder=10)
+                
+            ax_fv.set_title(f"Fair Value & Trades: {SHORT_PRODUCT_LABELS.get(product, product)}", fontsize=13, color="#c9d1d9", pad=10)
+            ax_fv.legend(fontsize=8, loc="upper right", framealpha=0.3)
+            ax_fv.grid(True, alpha=0.1, color="#30363d")
+            ax_fv.set_xlabel("Timestamp", fontsize=10, color="#8b949e")
+            ax_fv.tick_params(colors="#8b949e", labelsize=8)
+            for spine in ax_fv.spines.values():
+                spine.set_color("#30363d")
+        
+        fv_save_path = main_save_path.replace(".png", "_fair_value.png")
+        _save_and_show(fig_fv, fv_save_path, label + " Fair Value")
 
 
 def visualise_product_comparison(
@@ -746,5 +753,4 @@ def save_run_log(result: BacktestResult, label: str = "") -> str:
     with open(log_path, "w") as f:
         json.dump(log_data, f, indent=2)
 
-    print(f"  [LOG] {log_path}")
     return log_path
