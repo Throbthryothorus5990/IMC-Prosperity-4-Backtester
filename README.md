@@ -1,13 +1,10 @@
 # Python IMC Prosperity 4 Backtester
 
-Pure-Python port of the [Rust IMC Prosperity 4 backtester](https://github.com/GeyzsoN/prosperity_rust_backtester).
-
-Same matching logic, same PnL calculations, same position limits — now in Python with built-in visualisations.
 
 ## Features
 
-- **Exact matching engine** — order matching against book + market trades with queue penetration, slippage, and position limits
-- **Same PnL tracking** — cash + mark-to-market per product
+- **matching engine** — order matching against book + market trades with queue penetration, slippage, and position limits
+- **PnL tracking** — cash + mark-to-market per product
 - **Built-in visualiser** — PnL charts, drawdown analysis, mid-price/inventory overlay, return distributions
 - **Full metrics** — Sharpe, Calmar, max drawdown, recovery, and more
 - **Google Colab ready** — clone, overwrite trader, run
@@ -135,4 +132,4 @@ These are hardcoded to match the Rust backtester and IMC competition rules:
 
 ## License
 
-MIT / Apache-2.0 (same as original Rust backtester)
+MIT
